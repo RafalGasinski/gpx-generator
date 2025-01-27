@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="pl">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GPX Generator</title>
+    <style>
+        h1 {
+            text-align: center;
+        }
+
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            padding: 20px;
+            background-color: #f9f9f9;
+        }
+
+        form {
+            max-width: 400px;
+            margin: auto;
+            padding: 20px;
+            border: 1px solid #ddd;
+            background-color: #fff;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: bold;
+        }
+
+        input[type="text"],
+        input[type="checkbox"] {
+            margin-bottom: 20px;
+            padding: 8px;
+            font-size: 14px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+
+        button {
+            display: inline-block;
+            padding: 10px 20px;
+            font-size: 16px;
+            color: #fff;
+            background-color: #007BFF;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+
+        button:hover {
+            background-color: #0056b3;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>GPX Generator</h1>
+    <form id="routeForm">
+        <label for="startCoords">Punkt początkowy (lat,lon):</label>
+        <input type="text" id="startCoords" placeholder="49.9961, 20.0358" required>
+
+        <label for="endCoords">Punkt końcowy (lat,lon):</label>
+        <input type="text" id="endCoords" placeholder="49.7467, 19.2972" required>
+
+        <label for="alternativeMode">
+            <input type="checkbox" id="alternativeMode">
+            Dopuszczalne drogi nieutwardzone
+        </label>
+
+        <button type="submit">Generuj trasę</button>
+    </form>
+    <pre id="output"></pre>
+
+    <script>
+        class MinHeap {
+            constructor() {
+                this.heap = [];
+            }
+
+            insert(node) {
+                this.heap.push(node);
+                this.bubbleUp(this.heap.length - 1);
+            }
+
+            extractMin() {
+                if (this.heap.length === 1) return this.heap.pop();
+                const min = this.heap[0];
+                this.heap[0] = this.heap.pop();
+                this.bubbleDown(0);
+                return min;
+            }
+
+            bubbleUp(index) {
+                const parent = Math.floor((index - 1) / 2);
+                if (index <= 0 || this.heap[parent].distance <= this.heap[index].distance)
+                    return;
+                [this.heap[parent], this.heap[index]] = [this.heap[index], this.heap[parent]];
+                this.bubbleUp(parent);
+            }
+
+            bubbleDown(index) {
+                const left = 2 * index + 1;
+                const right = 2 * index + 2;
+                let smallest = index;
+
+                if (
+                    left < this.heap.length &&
+                    this.heap[left].distance < this.heap[smallest].distance
+                )
+                    smallest = left;
+
+                if (
+                    right < this.heap.length &&
+                    this.heap[right].distance < this.heap[smallest].distance
+                )
+                    smallest = right;
+
+                if (smallest !== index) {
+                    [this.heap[smallest], this.heap[index]] = [
+                        this.heap[index],
+                        this.heap[smallest],
+                    ];
+                    this.bubbleDown(smallest);
+                }
+            }
+
+            size() {
+                return this.heap.length;
+            }
+        }
+
+        function calculateDistance(lat1, lon1, lat2, lon2) {
+            if (!lat1 || !lon1 || !lat2 || !lon2) return Infinity;
+
+            const R = 6371e3;
+            const toRadians = (degrees) => (degrees * Math.PI) / 180;
+
+            const rlat1 = toRadians(lat1);
+            const rlat2 = toRadians(lat2);
+            const dlat = toRadians(lat2 - lat1);
+            const dlon = toRadians(lon2 - lon1);
+
+            const a = Math.sin(dlat / 2) * Math.sin(dlat / 2) + Math.cos(rlat1) * Math.cos(rlat2) * Math.sin(dlon / 2) * Math.sin(dlon / 2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+            return R * c;
+        }
+
+        function buildGraphFromOSM(data, highwayCosts, allowedHighways, excludedHighways) {
+            const graph = {};
+            const nodes = {};
+
+            for (const node of data.elements.filter((e) => e.type === "node")) {
+                nodes[node.id] = { lat: node.lat, lon: node.lon };
+            }
+
+            for (const way of data.elements.filter((e) => e.type === "way")) {
+                const highwayType = way.tags?.highway || "unknown";
+                const motorVehicle = way.tags?.motor_vehicle;
+
+                if (excludedHighways.includes(highwayType)) continue;
+                if (!allowedHighways.includes(highwayType)) continue;
+                if (motorVehicle === "no") continue;
+
+                const highwayCost = highwayCosts[highwayType] || highwayCosts.unknown;
+
+                for (let i = 0; i < way.nodes.length - 1; i++) {
+                    const from = way.nodes[i];
+                    const to = way.nodes[i + 1];
+                    const distance = calculateDistance(
+                        nodes[from]?.lat,
+                        nodes[from]?.lon,
+                        nodes[to]?.lat,
+                        nodes[to]?.lon
+                    );
+                    const weight = distance + highwayCost;
+
+                    if (!graph[from]) graph[from] = [];
+                    if (!graph[to]) graph[to] = [];
+
+                    graph[from].push({ to, weight });
+                    graph[to].push({ to: from, weight });
+                }
+            }
+            return { graph, nodes };
+        }
+
+        function buildAlternativeGraphFromOSM(
+            data,
+            highwayCosts = {
+                motorway: 50,
+                primary: 30,
+                secondary: 10,
+                tertiary: 5,
+                residential: 1,
+                service: 1,
+                unknown: 20,
+            }
+        ) {
+            const graph = {};
+            const nodes = {};
+
+            for (const node of data.elements.filter((e) => e.type === "node")) {
+                nodes[node.id] = { lat: node.lat, lon: node.lon };
+            }
+
+            for (const way of data.elements.filter((e) => e.type === "way")) {
+                const highwayType = way.tags?.highway || "unknown";
+                const highwayCost = highwayCosts[highwayType] || highwayCosts.unknown;
+
+                for (let i = 0; i < way.nodes.length - 1; i++) {
+                    const from = way.nodes[i];
+                    const to = way.nodes[i + 1];
+                    const distance = calculateDistance(
+                        nodes[from]?.lat,
+                        nodes[from]?.lon,
+                        nodes[to]?.lat,
+                        nodes[to]?.lon
+                    );
+                    const weight = distance + highwayCost;
+
+                    if (!graph[from]) graph[from] = [];
+                    if (!graph[to]) graph[to] = [];
+
+                    graph[from].push({ to, weight });
+                    graph[to].push({ to: from, weight });
+                }
+            }
+            return { graph, nodes };
+        }
+
+        function findPath(graph, start, end, nodes) {
+            const distances = {};
+            const previous = {};
+            const minHeap = new MinHeap();
+
+            for (const node in graph) {
+                distances[node] = Infinity;
+                previous[node] = null;
+            }
+            distances[start] = 0;
+            minHeap.insert({ node: start, distance: 0 });
+
+            while (minHeap.size() > 0) {
+                const { node: current, distance: currentDistance } = minHeap.extractMin();
+
+                if (!graph[current]) continue;
+
+                for (const neighbor of graph[current]) {
+                    const alt = currentDistance + neighbor.weight;
+                    if (alt < distances[neighbor.to]) {
+                        distances[neighbor.to] = alt;
+                        previous[neighbor.to] = current;
+                        minHeap.insert({ node: neighbor.to, distance: alt });
+                    }
+                }
+            }
+
+            const path = [];
+            let currentNode = end;
+            while (currentNode) {
+                const coords = nodes[currentNode];
+                if (coords) {
+                    path.unshift({ id: currentNode, lat: coords.lat, lon: coords.lon });
+                }
+                currentNode = previous[currentNode];
+            }
+
+            return { path, distance: distances[end] };
+        }
+
+        function fetchOSMData(lat1, lon1, lat2, lon2, callback) {
+            const overpassQuery = `
+        [out:json];
+        way["highway"](around:10000,${lat1},${lon1},${lat2},${lon2}); // Bounding box
+        out body;
+        >;
+        out skel qt;
+      `;
+
+            const xhr = new XMLHttpRequest();
+            xhr.open("POST", "https://overpass-api.de/api/interpreter", true);
+            xhr.setRequestHeader("Content-Type", "text/plain");
+
+            xhr.onreadystatechange = function () {
+                if (xhr.readyState === XMLHttpRequest.DONE && xhr.status === 200) {
+                    callback(null, JSON.parse(xhr.responseText));
+                } else if (xhr.readyState === XMLHttpRequest.DONE) {
+                    callback(new Error(`Overpass API error: ${xhr.statusText}`), null);
+                }
+            };
+
+            xhr.send(overpassQuery);
+        }
+
+        function exportToGPX(path, filename) {
+            const gpxHeader = `<?xml version="1.0" encoding="UTF-8"?>
+        <gpx version="1.1" creator="RouteGenerator" xmlns="http://www.topografix.com/GPX/1/1">
+          <trk><name>Generated Route</name><trkseg>`;
+            const gpxFooter = `</trkseg></trk></gpx>`;
+
+            const gpxContent = path
+                .map(
+                    (point) =>
+                        `<trkpt lat="${point.lat}" lon="${point.lon}"><ele>0</ele></trkpt>`
+                )
+                .join("\n");
+
+            const gpxData = gpxHeader + gpxContent + gpxFooter;
+            const blob = new Blob([gpxData], { type: "application/gpx+xml" });
+            const url = URL.createObjectURL(blob);
+
+            const link = document.createElement("a");
+            link.href = url;
+            link.download = filename;
+            link.click();
+
+            URL.revokeObjectURL(url);
+        }
+
+        document.getElementById("routeForm").addEventListener("submit", async (event) => {
+            event.preventDefault();
+
+            const output = document.getElementById("output");
+            output.textContent = "Generating route...";
+
+            const startInput = document.getElementById("startCoords").value;
+            const endInput = document.getElementById("endCoords").value;
+            const alternativeMode = document.getElementById("alternativeMode").checked;
+            const filename = (alternativeMode) ? "alt_track.gpx" : "track.gpx";
+
+            const [lat1, lon1] = startInput.split(",");
+            const [lat2, lon2] = endInput.split(",");
+
+            fetchOSMData(lat1, lon1, lat2, lon2, (err, osmData) => {
+                if (err) {
+                    output.textContent = `Error fetching data: ${err.message}`;
+                    return;
+                }
+
+                const { graph, nodes } = (alternativeMode) ? buildAlternativeGraphFromOSM(osmData) : buildGraphFromOSM(
+                    osmData,
+                    {
+                        motorway: 50,
+                        primary: 30,
+                        secondary: 10,
+                        tertiary: 5,
+                        residential: 1,
+                        service: 1,
+                        unknown: 20,
+                    },
+                    ["motorway", "primary", "secondary", "tertiary", "residential", "service"],
+                    ["footway", "cycleway", "path", "pedestrian"]
+                );
+
+                const startNode = findNearestNode(lat1, lon1, nodes);
+                const endNode = findNearestNode(lat2, lon2, nodes);
+
+                if (!startNode || !endNode) {
+                    output.textContent = "Could not find start or end node.";
+                    return;
+                }
+
+                const { path, distance } = findPath(graph, startNode, endNode, nodes);
+
+                if (path.length === 0) {
+                    output.textContent = "No route found.";
+                    return;
+                }
+
+                output.textContent = `Route generated! Total distance: ${distance.toFixed(2)}`;
+
+                exportToGPX(path, filename);
+            });
+        });
+
+        function findNearestNode(lat, lon, nodes) {
+            let nearestNode = null;
+            let minDistance = Infinity;
+
+            for (const [id, coords] of Object.entries(nodes)) {
+                const dist = calculateDistance(lat, lon, coords.lat, coords.lon);
+                if (dist < minDistance) {
+                    minDistance = dist;
+                    nearestNode = id;
+                }
+            }
+
+            return nearestNode;
+        }
+    </script>
+</body>
+
+</html>
