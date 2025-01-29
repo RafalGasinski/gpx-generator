@@ -63,15 +63,20 @@
 <body>
     <h1>GPX Generator</h1>
     <form id="routeForm">
-        <label for="startCoords">Punkt początkowy (lat,lon):</label>
+        <label for="startCoords">Punkt początkowy (lat, lon):</label>
         <input type="text" id="startCoords" placeholder="49.9961, 20.0358" required>
 
-        <label for="endCoords">Punkt końcowy (lat,lon):</label>
+        <label for="endCoords">Punkt końcowy (lat, lon):</label>
         <input type="text" id="endCoords" placeholder="49.7467, 19.2972" required>
 
         <label for="alternativeMode">
             <input type="checkbox" id="alternativeMode">
             Dopuszczalne drogi nieutwardzone
+        </label>
+
+        <label for="countDistanceCost">
+            <input type="checkbox" id="countDistanceCost" checked>
+            Najkrótsza możliwa droga
         </label>
 
         <button type="submit">Generuj trasę</button>
@@ -153,7 +158,7 @@
             return R * c;
         }
 
-        function buildGraphFromOSM(data, highwayCosts, allowedHighways, excludedHighways) {
+        function buildGraphFromOSM(data, countDistanceCost, highwayCosts, allowedHighways, excludedHighways) {
             const graph = {};
             const nodes = {};
 
@@ -180,7 +185,7 @@
                         nodes[to]?.lat,
                         nodes[to]?.lon
                     );
-                    const weight = distance + highwayCost;
+                    const weight = (countDistanceCost) ? distance + highwayCost : highwayCost;
 
                     if (!graph[from]) graph[from] = [];
                     if (!graph[to]) graph[to] = [];
@@ -192,18 +197,7 @@
             return { graph, nodes };
         }
 
-        function buildAlternativeGraphFromOSM(
-            data,
-            highwayCosts = {
-                motorway: 50,
-                primary: 30,
-                secondary: 10,
-                tertiary: 5,
-                residential: 1,
-                service: 1,
-                unknown: 20,
-            }
-        ) {
+        function buildAlternativeGraphFromOSM(data, countDistanceCost, highwayCosts) {
             const graph = {};
             const nodes = {};
 
@@ -224,7 +218,7 @@
                         nodes[to]?.lat,
                         nodes[to]?.lon
                     );
-                    const weight = distance + highwayCost;
+                    const weight = (countDistanceCost) ? distance + highwayCost : highwayCost;
 
                     if (!graph[from]) graph[from] = [];
                     if (!graph[to]) graph[to] = [];
@@ -329,33 +323,42 @@
             event.preventDefault();
 
             const output = document.getElementById("output");
-            output.textContent = "Generating route...";
+            output.textContent = "Szukam drogi...";
 
             const startInput = document.getElementById("startCoords").value;
             const endInput = document.getElementById("endCoords").value;
             const alternativeMode = document.getElementById("alternativeMode").checked;
-            const filename = (alternativeMode) ? "alt_track.gpx" : "track.gpx";
+            const countDistanceCost = document.getElementById("countDistanceCost").checked;
+            var filename = (countDistanceCost) ? "track_short.gpx" : "track_long.gpx";
+            if (alternativeMode && countDistanceCost) {
+                filename = "alt_track_short.gpx"
+            } else if (alternativeMode && !countDistanceCost) {
+                filename = "alt_track_long.gpx"
+            }
 
             const [lat1, lon1] = startInput.split(",");
             const [lat2, lon2] = endInput.split(",");
 
             fetchOSMData(lat1, lon1, lat2, lon2, (err, osmData) => {
                 if (err) {
-                    output.textContent = `Error fetching data: ${err.message}`;
+                    output.textContent = `Błąd pobierania danych: ${err.message}`;
                     return;
                 }
 
-                const { graph, nodes } = (alternativeMode) ? buildAlternativeGraphFromOSM(osmData) : buildGraphFromOSM(
+                const highwayCosts = {
+                    motorway: 50,
+                    primary: 30,
+                    secondary: 10,
+                    tertiary: 5,
+                    residential: 1,
+                    service: 1,
+                    unknown: 20,
+                }
+
+                const { graph, nodes } = (alternativeMode) ? buildAlternativeGraphFromOSM(osmData, countDistanceCost, highwayCosts) : buildGraphFromOSM(
                     osmData,
-                    {
-                        motorway: 50,
-                        primary: 30,
-                        secondary: 10,
-                        tertiary: 5,
-                        residential: 1,
-                        service: 1,
-                        unknown: 20,
-                    },
+                    countDistanceCost,
+                    highwayCosts,
                     ["motorway", "primary", "secondary", "tertiary", "residential", "service"],
                     ["footway", "cycleway", "path", "pedestrian"]
                 );
@@ -364,18 +367,23 @@
                 const endNode = findNearestNode(lat2, lon2, nodes);
 
                 if (!startNode || !endNode) {
-                    output.textContent = "Could not find start or end node.";
+                    output.textContent = "Nie znaleziono punktu początkowego lub końcowego.";
                     return;
                 }
 
                 const { path, distance } = findPath(graph, startNode, endNode, nodes);
 
                 if (path.length === 0) {
-                    output.textContent = "No route found.";
+                    output.textContent = "Nie znaleziono drogi.";
                     return;
                 }
 
-                output.textContent = `Route generated! Total distance: ${distance.toFixed(2)}`;
+                if (typeof distance === 'undefined' || distance === Infinity) {
+                    output.textContent = "Nie znaleziono drogi spełniającej kryteria.";
+                    return;
+                }
+
+                output.textContent = `Droga znalezione! Całkowity dystans: ${distance.toFixed(2)}`;
 
                 exportToGPX(path, filename);
             });
